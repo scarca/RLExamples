@@ -3,7 +3,8 @@ import tensorflow as tf
 import numpy as np
 import random 
 from multiprocessing import Pool 
-
+from collections import deque 
+import operator 
 class NeuralAgent(Agent): 
     def init(self, epsilon = 1, epsilon_decay = 0.9, **kwargs): 
         ''' 
@@ -27,8 +28,9 @@ class NeuralAgent(Agent):
         # basic neural agent 
         # only works with flat input 
         self.session = tf.Session() 
-        self.input_size = kwargs['size'] 
-        self.output_size = kwargs['out_size'] 
+        self._replay = [] 
+        self.input_size = kwargs['input_size'] 
+        self.output_size = kwargs['output_size'] 
         self.epsilon = epsilon  
         self.epsilon_decay = epsilon_decay
         self._train_set = [] 
@@ -146,3 +148,104 @@ class NeuralAgent(Agent):
             #hard update on c 
             if self._step % self._c == 0: 
                 self.update_target_hard() 
+
+
+class EpisodicNeuralAgent(Agent): 
+    ''' 
+    Workign Hyperparams (kinda): learning_rate = .01, gamma=.9, input_size=4, output_size = 2, epsilon = 1, epsilon_decay=.999,
+    9, 3, units in hidden layers 
+    Random 100-episode full episode replay 
+    ''' 
+    def init(self, epsilon = 1, epsilon_decay = 0.9, learning_rate = 0.1, gamma = 0.95, **kwargs): 
+        self.session = tf.Session() 
+        self.input_size = kwargs['input_size'] 
+        self.output_size = kwargs['output_size'] 
+        self.epsilon = epsilon  
+        self.epsilon_decay = epsilon_decay
+        self.gamma = gamma
+        self._replay = [] 
+        print(gamma, learning_rate)
+        # Graph instantiation 
+        with tf.variable_scope('inputs/'): 
+            inputs = tf.placeholder(tf.float32, shape = (None, self.input_size), name="inputs") 
+        with tf.variable_scope("net"): 
+            d1 = tf.layers.dense (
+                inputs = inputs, 
+                units = 9, 
+                activation = tf.nn.sigmoid, 
+                use_bias = True, 
+                name = "hidden_1"
+            )
+
+            d2 = tf.layers.dense(
+                inputs = d1, 
+                units = 3, 
+                activation = tf.nn.sigmoid, 
+                use_bias = True, 
+                name = "hidden_2"
+            )
+            out = tf.layers.dense(
+                inputs = d2, 
+                units = self.output_size, 
+                activation = tf.identity, 
+                name = "output"
+            )
+            self._forward = out 
+        with tf.variable_scope("learning/"): 
+            with tf.variable_scope('inputs'): 
+                reward = tf.placeholder(dtype = tf.float32, shape = (None,), name = "rewards") 
+                actions = tf.placeholder(dtype = tf.float32, shape = (None, self.output_size), name="actions") 
+                
+            with tf.variable_scope('loss'): 
+                loss = tf.reduce_sum(tf.square(reward - tf.reduce_max(out * actions, axis=1))) 
+            self._train = tf.train.RMSPropOptimizer(learning_rate = learning_rate).minimize(loss) 
+            self.summarize(loss) 
+        
+        #initialize memory - s a r 
+        self.episode_memory = [] 
+        self.replay_memory = [] 
+        self.session.run(tf.global_variables_initializer())
+    def do(self, observation): 
+        observation = observation.reshape(1, -1)
+        if random.random() < self.epsilon: 
+            action = self._action_space.sample()
+            self.epsilon *= self.epsilon_decay
+        else: 
+            qs = self.session.run(self._forward, feed_dict = {'inputs/inputs:0': observation})
+            action = np.argmax(qs) 
+            
+        zeros = np.zeros((1,self.output_size)) 
+        zeros[0, action] = 1 
+        self._action_cache = zeros 
+        self._state_cache = observation
+        return action 
+
+    def reward(self, reward, done): 
+        self.episode_memory.append((self._state_cache, self._action_cache, reward)) 
+        if done: 
+            self.train() 
+    
+    def train(self): 
+        # calculate true R 
+        raw_rewards = list(map(lambda x: x[2], self.episode_memory))
+        R = np.zeros((len(raw_rewards,))) 
+        R[-1] = raw_rewards[-1] 
+        i = len(raw_rewards) - 2
+        while i >= 0: 
+            R[i] = self.gamma * R[i + 1] + raw_rewards[i] 
+            i -= 1
+        actions = np.array(list(map(operator.itemgetter(1), self.episode_memory))).reshape(-1, self.output_size)
+        states = np.array(list(map(operator.itemgetter(0), self.episode_memory))).reshape(-1, self.input_size)
+        self._replay.append((states, actions, R)) 
+        if len(self._replay) > 100: 
+            self._replay.remove(min(map(lambda x: x[2][0], self._replay)))
+        # Feed one by one 
+        for states, actions, R in self._replay: 
+            self.session.run([self._train], feed_dict = {
+                'inputs/inputs:0': states, 
+                'learning/inputs/rewards:0': R, 
+                'learning/inputs/actions:0': actions
+            })
+            
+      
+        self.episode_memory = [] 

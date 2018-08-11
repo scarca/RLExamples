@@ -9,7 +9,7 @@ class Agent:
         print("INITIALIZING", self._id)
         self._step = 0 
         self.init(**kwargs)
-        self._logger = tf.summary.FileWriter(logdir="./agents/logs/{}".format(self._id), graph=tf.get_default_graph()) 
+        self._logger = tf.summary.FileWriter(logdir="./agents/logs/{}/{}".format(self.__class__.__name__, self._id), graph=tf.get_default_graph()) 
 
         self._logs = tf.summary.merge_all() 
 
